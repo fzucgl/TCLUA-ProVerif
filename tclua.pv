@@ -1,0 +1,329 @@
+(*************************************************************
+ * TCLUA — ProVerif model (applied pi calculus)
+ *
+ * Corresponds to IEEE IoT Journal manuscript §V-B
+ * (Section~\ref{sec:proverif}, Table~\ref{tab:proverif})
+ * and the protocol of Section~\ref{sec:scheme}.
+ *
+ * Four role processes: User and Cloud are replicated; Gateway and
+ * Terminal are a single node each, unrolled to two truly sequential
+ * sessions. A one-slot equality test (N2B = N2A / N3B = N3A) encodes
+ * the nonce cache of Section IV-C on that unrolling. The public
+ * inputs of those two sessions carry the [precise] option, which is
+ * required for ProVerif 2.05 to prove the injective queries.
+ *
+ * Registration uses private channels; M1–M4 and PAi use public
+ * channel `ch`. Ascon is an AEAD destructor; ECDH uses the usual
+ * exponent equation; the fuzzy extractor is deterministic in the
+ * enrolled biometric; baseline keys follow the BCM hash chain
+ *   SKgt_{v+1} = h(SKgt_v, GID_k, SID_j, v+1).
+ * Phase 1 publishes d_i, x, and y (post-session leakage).
+ *************************************************************)
+
+free ch: channel.
+free ch_reg_t: channel [private].
+free ch_reg_gw_req: channel [private].
+free ch_reg_gw_rep: channel [private].
+free ch_reg_u_req: channel [private].
+free ch_reg_u_rep: channel [private].
+
+free IDi, GIDk, SIDj: bitstring.
+
+free SKij, Kf: bitstring [private].
+
+type G.
+type exponent.
+const g: G.
+fun exp(G, exponent): G.
+equation forall a: exponent, b: exponent;
+  exp(exp(g, a), b) = exp(exp(g, b), a).
+fun g2b(G): bitstring [data].
+
+fun ascon_enc(bitstring, bitstring, bitstring, bitstring): bitstring.
+reduc forall k: bitstring, n: bitstring, ad: bitstring, p: bitstring;
+  ascon_dec(k, n, ad, ascon_enc(k, n, ad, p)) = p.
+
+fun h1(bitstring): bitstring.
+fun h2(bitstring, bitstring): bitstring.
+fun h3(bitstring, bitstring, bitstring): bitstring.
+fun h4(bitstring, bitstring, bitstring, bitstring): bitstring.
+fun h5(bitstring, bitstring, bitstring, bitstring, bitstring): bitstring.
+fun h6(bitstring, bitstring, bitstring, bitstring, bitstring, bitstring): bitstring.
+
+fun mask(bitstring, bitstring): bitstring.
+reduc forall d: bitstring, hv: bitstring; unmask(mask(d, hv), hv) = d.
+
+fun gen_delta(bitstring): bitstring.
+fun gen_tau(bitstring): bitstring.
+reduc forall bio: bitstring; rep(bio, gen_tau(bio)) = gen_delta(bio).
+
+fun b2(bitstring, bitstring): bitstring [data].
+fun b3(bitstring, bitstring, bitstring): bitstring [data].
+fun b4(bitstring, bitstring, bitstring, bitstring): bitstring [data].
+fun b5(bitstring, bitstring, bitstring, bitstring, bitstring): bitstring [data].
+
+const v0: bitstring.
+
+fun sidT(bitstring, bitstring, bitstring, bitstring): bitstring [data].
+fun sidM(bitstring, bitstring, bitstring, bitstring, bitstring): bitstring [data].
+
+event UBegin(bitstring, G).
+event GWAcceptU(bitstring, G).
+event GWIssue(bitstring, bitstring, bitstring).
+event TAcceptTicket(bitstring, bitstring, bitstring).
+event TRespond(bitstring, bitstring).
+event UAcceptT(bitstring, bitstring).
+
+(* ---- Queries (Table tab:proverif, in table order) ---- *)
+
+query attacker(SKij) phase 0.
+
+query attacker(Kf) phase 0.
+
+query tid: bitstring, qu: G;
+  inj-event(GWAcceptU(tid, qu)) ==> inj-event(UBegin(tid, qu)).
+
+query s: bitstring, ver: bitstring, n3: bitstring;
+  inj-event(TAcceptTicket(s, ver, n3)) ==> inj-event(GWIssue(s, ver, n3)).
+
+query s: bitstring, n5: bitstring;
+  inj-event(UAcceptT(s, n5)) ==> inj-event(TRespond(s, n5)).
+
+query attacker(SKij).
+
+
+let User(fi: bitstring, Ai: bitstring, rdev: bitstring, tau: bitstring,
+         tid0: bitstring, PWi: bitstring, BIOi: bitstring) =
+  ! (
+    let delta = rep(BIOi, tau) in
+    let Ai2 = h3(IDi, PWi, delta) in
+    if Ai2 = Ai then
+    let RPW = h3(PWi, delta, rdev) in
+    let di = unmask(fi, h2(IDi, RPW)) in
+    new N2: bitstring;
+    new ai: exponent;
+    new Ku: bitstring;
+    let Qu = exp(g, ai) in
+    let tid = tid0 in
+    let ad2 = b2(tid, g2b(Qu)) in
+    let pt2 = b2(SIDj, Ku) in
+    let CTTAG2 = ascon_enc(di, N2, ad2, pt2) in
+    event UBegin(tid, Qu);
+    out(ch, (tid, Qu, N2, CTTAG2));
+    in(ch, (Qg: G, N4: bitstring, Ver: bitstring, CTTAG4: bitstring));
+    let Sug = exp(Qg, ai) in
+    let Kug = h6(g2b(Sug), tid, SIDj, N2, g2b(Qu), g2b(Qg)) in
+    let kf  = h2(Ku, Kug) in
+    let ad4 = b5(tid, SIDj, Ver, g2b(Qu), g2b(Qg)) in
+    let ticket = ascon_dec(Kug, N4, ad4, CTTAG4) in
+    let b2(N3, CTTAG3) = ticket in
+    new NwKfU: bitstring;
+    out(ch, ascon_enc(kf, NwKfU, GIDk, Kf));
+    out(ch, (ticket, Ver));
+    in(ch, (N5: bitstring, CTTAG5: bitstring));
+    let ad5 = b3(SIDj, Ver, tid) in
+    let Kt = ascon_dec(kf, N5, ad5, CTTAG5) in
+    let sk = h6(kf, Kt, tid, SIDj, N3, N5) in
+    let sM = sidM(tid, SIDj, Ver, N3, N5) in
+    event UAcceptT(sM, N5);
+    new NwSkU: bitstring;
+    out(ch, ascon_enc(sk, NwSkU, GIDk, SKij));
+    let tidnext = h5(tid, di, N2, g2b(Qu), g2b(Qg)) in
+    0
+  ).
+
+let Gateway(Xgw: bitstring, SKgt: bitstring, Ver: bitstring) =
+  in(ch, (N1: bitstring, CTTAG1: bitstring));
+  let PT1 = ascon_dec(Xgw, N1, GIDk, CTTAG1) in
+  let b5(idi, tid0, di, Di, Expi) = PT1 in
+  if idi = IDi && Di = SIDj then
+  (
+    in(ch, (tidA: bitstring, QuA: G, N2A: bitstring, CTTAG2A: bitstring)) [precise];
+    if tidA = tid0 then
+    let ad2A = b2(tidA, g2b(QuA)) in
+    let pt2A = ascon_dec(di, N2A, ad2A, CTTAG2A) in
+    let b2(sidjA, KuA) = pt2A in
+    if sidjA = SIDj && sidjA = Di then
+    (
+      event GWAcceptU(tidA, QuA);
+      new bkA: exponent;
+      new N3A: bitstring;
+      new N4A: bitstring;
+      let QgA = exp(g, bkA) in
+      let SugA = exp(QuA, bkA) in
+      let KugA = h6(g2b(SugA), tidA, SIDj, N2A, g2b(QuA), g2b(QgA)) in
+      let kfA  = h2(KuA, KugA) in
+      let ad3A = b2(SIDj, Ver) in
+      let pt3A = b2(kfA, tidA) in
+      let CTTAG3A = ascon_enc(SKgt, N3A, ad3A, pt3A) in
+      let ticketA = b2(N3A, CTTAG3A) in
+      let ad4A = b5(tidA, SIDj, Ver, g2b(QuA), g2b(QgA)) in
+      let CTTAG4A = ascon_enc(KugA, N4A, ad4A, ticketA) in
+      let sTA = sidT(tidA, SIDj, Ver, N3A) in
+      event GWIssue(sTA, Ver, N3A);
+      out(ch, (QgA, N4A, Ver, CTTAG4A));
+      (* session 2: reject a replay of N2A *)
+      in(ch, (tidB: bitstring, QuB: G, N2B: bitstring, CTTAG2B: bitstring)) [precise];
+      if tidB = tid0 then
+      (
+        if N2B = N2A then
+          0
+        else
+        (
+          let ad2B = b2(tidB, g2b(QuB)) in
+          let pt2B = ascon_dec(di, N2B, ad2B, CTTAG2B) in
+          let b2(sidjB, KuB) = pt2B in
+          if sidjB = SIDj && sidjB = Di then
+          (
+            event GWAcceptU(tidB, QuB);
+            new bkB: exponent;
+            new N3B: bitstring;
+            new N4B: bitstring;
+            let QgB = exp(g, bkB) in
+            let SugB = exp(QuB, bkB) in
+            let KugB = h6(g2b(SugB), tidB, SIDj, N2B, g2b(QuB), g2b(QgB)) in
+            let kfB  = h2(KuB, KugB) in
+            let ad3B = b2(SIDj, Ver) in
+            let pt3B = b2(kfB, tidB) in
+            let CTTAG3B = ascon_enc(SKgt, N3B, ad3B, pt3B) in
+            let ticketB = b2(N3B, CTTAG3B) in
+            let ad4B = b5(tidB, SIDj, Ver, g2b(QuB), g2b(QgB)) in
+            let CTTAG4B = ascon_enc(KugB, N4B, ad4B, ticketB) in
+            let sTB = sidT(tidB, SIDj, Ver, N3B) in
+            event GWIssue(sTB, Ver, N3B);
+            out(ch, (QgB, N4B, Ver, CTTAG4B))
+          )
+        )
+      )
+    )
+  ).
+
+let Terminal(SKgt: bitstring, Ver: bitstring) =
+  in(ch, (ticketA: bitstring, VerMA: bitstring)) [precise];
+  if VerMA = Ver then
+  let b2(N3A, CTTAG3A) = ticketA in
+  let ad3A = b2(SIDj, Ver) in
+  let pt3A = ascon_dec(SKgt, N3A, ad3A, CTTAG3A) in
+  let b2(kfA, tidA) = pt3A in
+  let sTA = sidT(tidA, SIDj, Ver, N3A) in
+  event TAcceptTicket(sTA, Ver, N3A);
+  new KtA: bitstring;
+  new N5A: bitstring;
+  let skA = h6(kfA, KtA, tidA, SIDj, N3A, N5A) in
+  let ad5A = b3(SIDj, Ver, tidA) in
+  let CTTAG5A = ascon_enc(kfA, N5A, ad5A, KtA) in
+  let sMA = sidM(tidA, SIDj, Ver, N3A, N5A) in
+  event TRespond(sMA, N5A);
+  new NwKfTA: bitstring;
+  new NwSkTA: bitstring;
+  out(ch, ascon_enc(kfA, NwKfTA, GIDk, Kf));
+  out(ch, (N5A, CTTAG5A));
+  out(ch, ascon_enc(skA, NwSkTA, GIDk, SKij));
+  (* session 2: reject a replay of N3A *)
+  in(ch, (ticketB: bitstring, VerMB: bitstring)) [precise];
+  if VerMB = Ver then
+  let b2(N3B, CTTAG3B) = ticketB in
+  (
+    if N3B = N3A then
+      0
+    else
+    (
+      let ad3B = b2(SIDj, Ver) in
+      let pt3B = ascon_dec(SKgt, N3B, ad3B, CTTAG3B) in
+      let b2(kfB, tidB) = pt3B in
+      let sTB = sidT(tidB, SIDj, Ver, N3B) in
+      event TAcceptTicket(sTB, Ver, N3B);
+      new KtB: bitstring;
+      new N5B: bitstring;
+      let skB = h6(kfB, KtB, tidB, SIDj, N3B, N5B) in
+      let ad5B = b3(SIDj, Ver, tidB) in
+      let CTTAG5B = ascon_enc(kfB, N5B, ad5B, KtB) in
+      let sMB = sidM(tidB, SIDj, Ver, N3B, N5B) in
+      event TRespond(sMB, N5B);
+      new NwKfTB: bitstring;
+      new NwSkTB: bitstring;
+      out(ch, ascon_enc(kfB, NwKfTB, GIDk, Kf));
+      out(ch, (N5B, CTTAG5B));
+      out(ch, ascon_enc(skB, NwSkTB, GIDk, SKij))
+    )
+  ).
+
+let Cloud(Xgw: bitstring, di: bitstring, tid0: bitstring) =
+  ! (
+    new N1: bitstring;
+    new Expi: bitstring;
+    let PT1 = b5(IDi, tid0, di, SIDj, Expi) in
+    let CTTAG1 = ascon_enc(Xgw, N1, GIDk, PT1) in
+    out(ch, (N1, CTTAG1));
+    0
+  ).
+
+process
+  new x: bitstring;
+  new y: bitstring;
+  new xui: bitstring;
+  new PWi: bitstring;
+  new BIOi: bitstring;
+  new ri: bitstring;
+  new rdev: bitstring;
+  new TID0: bitstring;
+  new SKgt0: bitstring;
+  new ch_start_u: channel;
+  new ch_start_gw: channel;
+  new ch_start_t: channel;
+  new ch_start_cs: channel;
+  (
+    out(ch_reg_t, (SIDj, SKgt0, v0))
+  | (
+    in(ch_reg_t, (sidjT: bitstring, skt: bitstring, vert: bitstring));
+    out(ch_start_t, (sidjT, skt, vert))
+  )
+  | (
+    out(ch_reg_gw_req, (GIDk, SIDj));
+    in(ch_reg_gw_rep, Xgw2: bitstring);
+    out(ch_start_gw, (Xgw2, SKgt0, v0))
+  )
+  | (
+    in(ch_reg_gw_req, (gidC: bitstring, Lk: bitstring));
+    let Xgw = h2(gidC, x) in
+    out(ch_reg_gw_rep, Xgw);
+    in(ch_reg_u_req, (idiC: bitstring, RPWpC: bitstring));
+    let di = h3(idiC, y, xui) in
+    let fp = mask(di, h2(idiC, RPWpC)) in
+    out(ch_reg_u_rep, (fp, TID0));
+    out(ch_start_cs, (Xgw, di, TID0))
+  )
+  | (
+    let delta = gen_delta(BIOi) in
+    let tau = gen_tau(BIOi) in
+    let RPWp = h3(PWi, delta, ri) in
+    out(ch_reg_u_req, (IDi, RPWp));
+    in(ch_reg_u_rep, (fpU: bitstring, tidU: bitstring));
+    let RPW = h3(PWi, delta, rdev) in
+    let diU = unmask(fpU, h2(IDi, RPWp)) in
+    let fi = mask(diU, h2(IDi, RPW)) in
+    let Ai = h3(IDi, PWi, delta) in
+    out(ch_start_u, (fi, Ai, rdev, tau, tidU, PWi, BIOi))
+  )
+  | (
+    in(ch_start_u, (fi: bitstring, Ai: bitstring, rdevS: bitstring,
+                    tau: bitstring, tidU: bitstring,
+                    PWs: bitstring, BIOs: bitstring));
+    ! User(fi, Ai, rdevS, tau, tidU, PWs, BIOs)
+  )
+  | (
+    in(ch_start_gw, (Xgw2: bitstring, SKgt: bitstring, Ver: bitstring));
+    Gateway(Xgw2, SKgt, Ver)
+  )
+  | (
+    in(ch_start_t, (sidjT: bitstring, skt: bitstring, vert: bitstring));
+    Terminal(skt, vert)
+  )
+  | (
+    in(ch_start_cs, (Xgw: bitstring, di: bitstring, tid0: bitstring));
+    (
+      (! Cloud(Xgw, di, tid0))
+    | (phase 1; out(ch, (di, x, y)))
+    )
+  )
+  )
